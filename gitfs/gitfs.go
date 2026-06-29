@@ -1,13 +1,11 @@
 // Package gitfs provides an fs.FS adapter for artifact-fs repositories.
 //
-// Artifact-fs is a git-backed FUSE filesystem. This package exposes its core
-// read/write engine as a standard Go [io/fs.FS], allowing in-process use
-// without mounting FUSE.
+// This package depends only on the portable fsadapter core and has no
+// dependency on FUSE or SQLite. Concrete store implementations (snapshot,
+// overlay) can be swapped; for example, an in-memory store for WASM or
+// a pure-Go SQLite driver for environments without libc.
 //
 // # Getting started
-//
-// Construct an [Engine] and [Resolver] from your snapshot and overlay stores,
-// then call [New] or [NewWritable] to get an fs.FS:
 //
 //	fsys := gitfs.New(engine, resolver)
 //	data, err := fs.ReadFile(fsys, "README.md")
@@ -36,37 +34,33 @@ import (
 	"context"
 	"io/fs"
 
-	"github.com/cloudflare/artifact-fs/internal/fusefs"
-	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/cloudflare/artifact-fs/internal/fsadapter"
 )
 
-// Engine is the core read/write engine for artifact-fs.
-type Engine = fusefs.Engine
+// ReadEngine provides read access to file content.
+type ReadEngine = fsadapter.ReadEngine
 
-// Resolver merges snapshot and overlay views of the repository tree.
-type Resolver = fusefs.Resolver
+// WriteEngine extends ReadEngine with write operations.
+type WriteEngine = fsadapter.WriteEngine
+
+// Resolver resolves paths and provides directory/attribute information.
+type Resolver = fsadapter.Resolver
 
 // WritableFS extends [io/fs.FS] with write operations backed by the overlay.
-type WritableFS interface {
-	fs.FS
-	WriteFile(ctx context.Context, name string, data []byte, perm fs.FileMode) error
-	Mkdir(ctx context.Context, name string, perm fs.FileMode) error
-	Remove(ctx context.Context, name string) error
-	Rename(ctx context.Context, oldName, newName string) error
-}
+type WritableFS = fsadapter.WritableFS
 
 // New creates a read-only [io/fs.FS] backed by the given engine and resolver.
 //
 // The returned value also satisfies [io/fs.ReadDirFS] and [io/fs.StatFS].
-func New(engine *Engine, resolver *Resolver) fs.FS {
-	return fusefs.NewArtifactFS(engine, resolver)
+func New(engine ReadEngine, resolver Resolver) fs.FS {
+	return fsadapter.New(engine, resolver)
 }
 
 // NewWritable creates a [WritableFS] backed by the given engine and resolver.
 //
 // Write operations delegate to the engine's overlay layer.
-func NewWritable(engine *Engine, resolver *Resolver) WritableFS {
-	return fusefs.NewWritableFS(engine, resolver)
+func NewWritable(engine WriteEngine, resolver Resolver) WritableFS {
+	return fsadapter.NewWritable(engine, resolver)
 }
 
 // WithContext returns a shallow copy of fsys that uses ctx for all I/O.
@@ -81,19 +75,4 @@ func WithContext(fsys fs.FS, ctx context.Context) fs.FS {
 		return cfs.WithContext(ctx)
 	}
 	return fsys
-}
-
-// NewResolver creates a new [Resolver] with the given snapshot and overlay stores.
-func NewResolver(snapshot model.SnapshotStore, overlay model.OverlayStore) *Resolver {
-	return &fusefs.Resolver{Snapshot: snapshot, Overlay: overlay}
-}
-
-// NewEngine creates a new [Engine] with the given dependencies.
-func NewEngine(resolver *Resolver, repo model.RepoConfig, overlay model.OverlayStore, hydrator model.Hydrator) *Engine {
-	return &fusefs.Engine{
-		Resolver: resolver,
-		Repo:     repo,
-		Overlay:  overlay,
-		Hydrator: hydrator,
-	}
 }
