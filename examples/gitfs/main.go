@@ -1,11 +1,12 @@
-// Package main demonstrates using the gitfs package with in-memory stores.
+// Package main demonstrates using the gitfs package.
 //
-// It shows how to build an fs.FS from snapshot + overlay data without FUSE
-// or SQLite. For a full example with real git clone, see the daemon.
+// Without flags it runs an in-memory demo (no git, no SQLite, WASM-safe).
+// With --repo it clones the real repository and reads files through fs.FS.
 //
 // Usage:
 //
-//	go run ./examples/gitfs
+//	go run ./examples/gitfs                                    # in-memory demo
+//	go run ./examples/gitfs --repo https://github.com/justwasm/gitfs
 //	go run ./examples/gitfs --repo https://github.com/golang/go --branch master
 package main
 
@@ -26,37 +27,24 @@ import (
 )
 
 var (
-	repoURL = flag.String("repo", "https://github.com/justwasm/gitfs", "git remote URL (informational)")
-	branch  = flag.String("branch", "main", "branch name (informational)")
+	repoURL = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
+	branch  = flag.String("branch", "main", "branch to check out")
 )
 
 func main() {
 	flag.Parse()
 	ctx := context.Background()
 
-	// ── 1. Build an in-memory snapshot ───────────────────────────────────
+	var fsys fs.FS
+	if *repoURL == "" {
+		fmt.Println("--- In-memory demo (no --repo specified) ---")
+		fsys = buildInMemoryFS()
+	} else {
+		fmt.Printf("--- Cloning %s (%s) ---\n\n", *repoURL, *branch)
+		fsys = cloneAndBuildFS(ctx)
+	}
 
-	snap := &memSnapshot{nodes: map[string]model.BaseNode{}, kids: map[string][]model.BaseNode{}, content: map[string][]byte{}}
-	snap.addDir(".")
-	snap.addDir("docs")
-	snap.addFile("README.md", "# Hello from gitfs\n\nThis is an in-memory example.\n", 0o644)
-	snap.addFile("docs/guide.md", "# Guide\n\nStep 1, step 2, step 3.\n", 0o644)
-	snap.addFile("main.go", "package main\n\nfunc main() {}\n", 0o644)
-	snap.addDir("src")
-	snap.addFile("src/app.go", "package src\n\n// App does things.\n", 0o644)
-
-	ov := &memOverlay{entries: map[string]model.OverlayEntry{}}
-
-	// ── 2. Create resolver + engine (all in-memory) ─────────────────────
-
-	// In real usage you'd implement these interfaces against your DB.
-	// Here we use the adapter interfaces directly — no SQLite, no FUSE.
-	resolver := &memResolver{snap: snap, ov: ov, gen: 1}
-	engine := &memEngine{snap: snap, ov: ov, gen: 1, files: map[string][]byte{}}
-
-	fsys := gitfs.New(engine, resolver)
-
-	// ── 3. Read the root directory ───────────────────────────────────────
+	// ── Read root ───────────────────────────────────────────────────────
 
 	fmt.Println("--- Root ---")
 	entries, err := fs.ReadDir(fsys, ".")
@@ -71,7 +59,7 @@ func main() {
 		fmt.Printf("  %s [%s]\n", e.Name(), kind)
 	}
 
-	// ── 4. Walk the tree ─────────────────────────────────────────────────
+	// ── Walk ────────────────────────────────────────────────────────────
 
 	fmt.Println("\n--- Walk ---")
 	var fileCount, dirCount int
@@ -84,15 +72,34 @@ func main() {
 		} else {
 			fileCount++
 		}
-		fmt.Printf("  %s\n", path)
 		return nil
 	})
 	fmt.Printf("\n  %d directories, %d files\n", dirCount, fileCount)
 
-	// ── 5. Read some files ───────────────────────────────────────────────
+	// ── Read files ──────────────────────────────────────────────────────
 
-	fmt.Println("\n--- Read ---")
-	for _, name := range []string{"README.md", "docs/guide.md", "src/app.go"} {
+	fmt.Println("\n--- Sample files ---")
+	var samples []string
+	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || len(samples) >= 3 {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".md" || ext == ".go" || ext == ".txt" || ext == ".mod" {
+			samples = append(samples, path)
+		}
+		return nil
+	})
+	if len(samples) == 0 {
+		fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || len(samples) >= 3 {
+				return nil
+			}
+			samples = append(samples, path)
+			return nil
+		})
+	}
+	for _, name := range samples {
 		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			fmt.Printf("  %s: %v\n", name, err)
@@ -105,66 +112,73 @@ func main() {
 		fmt.Printf("  %s (%d bytes):\n    %s\n\n", name, len(data), strings.ReplaceAll(string(preview), "\n", "\n    "))
 	}
 
-	// ── 6. Stat ──────────────────────────────────────────────────────────
+	// ── Stat ────────────────────────────────────────────────────────────
 
 	fmt.Println("--- Stat ---")
-	for _, name := range []string{".", "README.md", "docs"} {
-		fi, err := fs.Stat(fsys, name)
-		if err != nil {
-			fmt.Printf("  %s: %v\n", name, err)
-			continue
-		}
-		fmt.Printf("  %s: size=%d mode=%s isDir=%v\n", name, fi.Size(), fi.Mode(), fi.IsDir())
-	}
-
-	// ── 7. WritableFS ────────────────────────────────────────────────────
-
-	fmt.Println("\n--- Write ---")
-	wfs := gitfs.NewWritable(engine, resolver)
-
-	if err := wfs.WriteFile(ctx, "notes.txt", []byte("hello from gitfs\n"), 0o644); err != nil {
-		log.Fatalf("WriteFile: %v", err)
-	}
-	if err := wfs.Mkdir(ctx, "drafts", 0o755); err != nil {
-		log.Fatalf("Mkdir: %v", err)
-	}
-
-	data, err := fs.ReadFile(wfs, "notes.txt")
+	fi, err := fs.Stat(fsys, ".")
 	if err != nil {
-		log.Fatalf("ReadFile after write: %v", err)
+		log.Fatalf("stat root: %v", err)
 	}
-	fmt.Printf("  notes.txt: %s", data)
-
-	// Read back via ReadDir to confirm drafts/ appeared.
-	entries, _ = fs.ReadDir(wfs, ".")
-	fmt.Print("  root after writes: ")
-	for _, e := range entries {
-		fmt.Printf("%s ", e.Name())
+	fmt.Printf("  .: size=%d mode=%s isDir=%v\n", fi.Size(), fi.Mode(), fi.IsDir())
+	if len(samples) > 0 {
+		fi, err = fs.Stat(fsys, samples[0])
+		if err != nil {
+			fmt.Printf("  %s: %v\n", samples[0], err)
+		} else {
+			fmt.Printf("  %s: size=%d mode=%s isDir=%v\n", samples[0], fi.Size(), fi.Mode(), fi.IsDir())
+		}
 	}
-	fmt.Println()
 
-	// ── 8. WithContext ───────────────────────────────────────────────────
+	// ── WithContext ─────────────────────────────────────────────────────
 
+	fmt.Println("\n--- Context ---")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	fsys = gitfs.WithContext(fsys, ctx)
-
-	data, err = fs.ReadFile(fsys, "README.md")
+	boundFS := gitfs.WithContext(fsys, ctx)
+	data, err := fs.ReadFile(boundFS, samples[0])
 	if err != nil {
-		log.Fatalf("ReadFile with context: %v", err)
+		fmt.Printf("  %v\n", err)
+	} else {
+		fmt.Printf("  %s read with 5s timeout: %d bytes\n", samples[0], len(data))
 	}
-	fmt.Printf("\n  README.md with context: %d bytes\n", len(data))
-
-	_ = *repoURL // informational only
-	_ = *branch
 }
 
-// ─── In-memory test doubles (no SQLite, no FUSE) ────────────────────────────
+// ─── In-memory demo ─────────────────────────────────────────────────────────
+
+func buildInMemoryFS() fs.FS {
+	snap := &memSnapshot{nodes: map[string]model.BaseNode{}, kids: map[string][]model.BaseNode{}, content: map[string][]byte{}}
+	snap.addDir(".")
+	snap.addDir("docs")
+	snap.addFile("README.md", "# Hello from gitfs\n\nThis is an in-memory example.\n", 0o644)
+	snap.addFile("docs/guide.md", "# Guide\n\nStep 1, step 2, step 3.\n", 0o644)
+	snap.addFile("main.go", "package main\n\nfunc main() {}\n", 0o644)
+	snap.addDir("src")
+	snap.addFile("src/app.go", "package src\n\n// App does things.\n", 0o644)
+
+	ov := &memOverlay{entries: map[string]model.OverlayEntry{}}
+	resolver := &memResolver{snap: snap, ov: ov, gen: 1}
+	engine := &memEngine{snap: snap, ov: ov, gen: 1, files: map[string][]byte{}}
+	return gitfs.New(engine, resolver)
+}
+
+// ─── Real clone ─────────────────────────────────────────────────────────────
+
+func cloneAndBuildFS(ctx context.Context) fs.FS {
+	// Lazy-imported to keep the in-memory path WASM-safe.
+	// When --repo is set we accept the SQLite/FUSE dependency.
+	return cloneAndBuildFSImpl(ctx)
+}
+
+// impl lives in a separate file behind a build tag so the in-memory
+// example compiles for WASM without pulling in SQLite.
+// See: clone_live.go
+
+// ─── In-memory test doubles ─────────────────────────────────────────────────
 
 type memSnapshot struct {
 	nodes   map[string]model.BaseNode
 	kids    map[string][]model.BaseNode
-	content map[string][]byte // file path → content
+	content map[string][]byte
 }
 
 func (m *memSnapshot) addDir(path string) {
@@ -207,8 +221,6 @@ func (o *memOverlay) ListByPrefix(_ context.Context, _ string) ([]model.OverlayE
 	return nil, nil
 }
 
-// ─── Resolver (satisfies gitfs.Resolver / fsadapter.Resolver) ───────────────
-
 type memResolver struct {
 	snap *memSnapshot
 	ov   *memOverlay
@@ -249,7 +261,6 @@ func (r *memResolver) Getattr(path string) (mode uint32, size int64, nodeType st
 
 func (r *memResolver) ReaddirTyped(_ context.Context, path string) ([]fsadapter.ReaddirEntry, error) {
 	set := map[string]fsadapter.ReaddirEntry{}
-	// Snapshot children.
 	children, err := r.snap.ListChildren(r.gen, path)
 	if err == nil {
 		for _, c := range children {
@@ -257,7 +268,6 @@ func (r *memResolver) ReaddirTyped(_ context.Context, path string) ([]fsadapter.
 			set[name] = fsadapter.ReaddirEntry{Name: name, Type: c.Type}
 		}
 	}
-	// Overlay entries (create/mkdir override snapshot).
 	for _, e := range r.ov.entries {
 		name, ok := childName(path, e.Path)
 		if !ok {
@@ -294,17 +304,14 @@ func childName(parent, entryPath string) (string, bool) {
 	return rel, true
 }
 
-// ─── Engine (satisfies gitfs.WriteEngine / fsadapter.WriteEngine) ──────────
-
 type memEngine struct {
 	snap  *memSnapshot
 	ov    *memOverlay
 	gen   int64
-	files map[string][]byte // overlay content (written files)
+	files map[string][]byte
 }
 
 func (e *memEngine) Read(_ context.Context, path string, off int64, size int) ([]byte, error) {
-	// Check overlay first (written files).
 	if data, ok := e.files[path]; ok {
 		if off >= int64(len(data)) {
 			return nil, io.EOF
@@ -315,7 +322,6 @@ func (e *memEngine) Read(_ context.Context, path string, off int64, size int) ([
 		}
 		return data[off:end], nil
 	}
-	// Check snapshot content cache.
 	if data, ok := e.snap.content[path]; ok {
 		if off >= int64(len(data)) {
 			return nil, io.EOF
@@ -333,13 +339,12 @@ func (e *memEngine) Write(_ context.Context, path string, off int64, data []byte
 	if e.files == nil {
 		e.files = map[string][]byte{}
 	}
-	// Create overlay entry for new files so ReaddirTyped sees them.
 	if _, exists := e.files[path]; !exists {
 		if _, inSnap := e.snap.GetNode(e.gen, path); !inSnap {
 			e.ov.entries[path] = model.OverlayEntry{
-				Path:     path,
-				Kind:     model.OverlayKindCreate,
-				Mode:     0o644,
+				Path:      path,
+				Kind:      model.OverlayKindCreate,
+				Mode:      0o644,
 				SizeBytes: off + int64(len(data)),
 			}
 		}
