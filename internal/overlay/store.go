@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,14 +45,18 @@ func New(ctx context.Context, cfg model.RepoConfig) (*Store, error) {
 		return nil, err
 	}
 	if err := meta.ExecMigrations(ctx, db, migrations); err != nil {
+		db.Close()
 		return nil, err
 	}
 	if err := ensureOverlaySchema(ctx, db); err != nil {
+		db.Close()
 		return nil, err
 	}
 	upperDir := filepath.Join(cfg.OverlayDir, "upper")
 	if err := os.MkdirAll(upperDir, 0o755); err != nil {
-		return nil, err
+		// Filesystem unavailable (e.g. WASM) — continue with in-memory DB.
+		slog.Warn("overlay: cannot create upper dir, continuing without backing files", "dir", upperDir, "err", err)
+		return &Store{db: db, repo: cfg}, nil
 	}
 	return &Store{db: db, repo: cfg, upperDir: upperDir}, nil
 }

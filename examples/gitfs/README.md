@@ -1,43 +1,55 @@
 # gitfs Example
 
-Demonstrates the `gitfs` package using in-memory stores — no FUSE, no SQLite, fully portable (compiles to WASM).
+Demonstrates the `gitfs` package with two modes: in-memory demo (no deps, WASM-safe) and live git clone.
+
+## Usage
+
+```bash
+go run ./examples/gitfs                                                        # in-memory demo
+go run ./examples/gitfs --repo https://github.com/justwasm/gitfs               # native clone
+go run ./examples/gitfs --repo https://github.com/golang/go --branch master    # specific branch
+go run ./examples/gitfs --repo URL --cors-prefix https://proxy.example.com/    # CORS proxy (WASM)
+go run ./examples/gitfs --repo URL --persist                                   # SQLite-backed stores
+```
+
+## Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--repo` | _(empty)_ | Git remote URL. Empty = in-memory demo. |
+| `--branch` | `main` | Branch to check out. |
+| `--cors-prefix` | _(empty)_ | Prepend to GitHub API URLs for CORS proxy. |
+| `--persist` | `false` | Use SQLite-backed snapshot/overlay stores (fallback to `:memory:` on WASM). |
+
+## What's tested
+
+| # | Flags | Mode | Storage |
+|---|-------|------|---------|
+| 1 | _(none)_ | In-memory | Go maps |
+| 2 | `--repo` | Native git clone | SQLite file DB |
+| 3 | `--repo --persist` | Native git clone | SQLite file DB |
+| 4 | `--repo --persist` on WASM | GitHub API tree fetch | SQLite `:memory:` (fallback to Go maps) |
+| 5 | `--repo --cors-prefix` on WASM | GitHub API via CORS proxy | Go maps |
 
 ## Capabilities demonstrated
 
-| Capability | API | What you see |
-|------------|-----|--------------|
-| Directory listing | `fs.ReadDir` | Root shows 4 entries, subdirectories expanded |
-| Recursive walk | `fs.WalkDir` | 3 directories, 4 files traversed |
-| File reading | `fs.ReadFile` | README.md content read back in full |
-| File metadata | `fs.Stat` | size, mode, isDir reported |
-| Write file | `WritableFS.WriteFile` | notes.txt written and read back |
-| Create directory | `WritableFS.Mkdir` | drafts/ appears in subsequent ReadDir |
-| Context propagation | `gitfs.WithContext` | Timeout-bounded read |
-| Portable core | `GOOS=js GOARCH wasm` | No FUSE or SQLite dependency |
-
-## Capabilities NOT demonstrated
-
-This example uses in-memory stubs, so it does not exercise:
-
-- **Hydrator blob fetch** — In production, `Engine.Read` calls `Hydrator.EnsureHydrated` to lazily pull blobs from the git object store on first access. The stub returns cached content directly.
-- **Overlay copy-on-write** — The real overlay promotes a base file to a mutable copy before modification. The stub writes straight to a map.
-- **Symlink resolution** — `Open` on a symlink resolves its target and returns the target's content. No symlinks are in the stub data.
-- **Watcher / auto-refresh** — The daemon watches HEAD for changes and rebuilds the snapshot. This example is a one-shot snapshot.
-- **FUSE mount** — The full `internal/fusefs` layer provides kernel-level VFS. This example is purely in-process.
+| Capability | API |
+|------------|-----|
+| Directory listing | `fs.ReadDir` |
+| Recursive walk | `fs.WalkDir` |
+| File reading | `fs.ReadFile` (lazy blob fetch via HTTP on WASM) |
+| File metadata | `fs.Stat` |
+| Write file | `WritableFS.WriteFile` |
+| Create directory | `WritableFS.Mkdir` |
+| Context propagation | `gitfs.WithContext` |
+| CORS proxy | `--cors-prefix` prepends to API URLs |
+| SQLite fallback | `--persist` tries file DB → `:memory:` → Go maps |
+| WASM | Compiles to `GOOS=js GOARCH=wasm`, no FUSE/CGo |
 
 ## Run
 
 ```bash
 go run ./examples/gitfs
-go run ./examples/gitfs --repo https://github.com/golang/go --branch master
 ```
 
-## Run for real
-
-To read an actual git repository, replace the in-memory stubs with the concrete stores from `internal/snapshot`, `internal/overlay`, and `internal/hydrator`. See `internal/daemon/daemon.go` for the full initialization sequence:
-
-1. `gitstore.CloneBlobless` — blobless clone
-2. `gitstore.BuildTreeIndex` → `snapshot.PublishGeneration` — build snapshot
-3. `overlay.New` — open overlay store
-4. `hydrator.New` — create on-demand blob fetcher
-5. `gitfs.New(engine, resolver)` — get an `fs.FS`
+Requires `git` on `$PATH` for native clone mode. WASM mode only needs HTTP access to GitHub API.

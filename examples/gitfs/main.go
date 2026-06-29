@@ -23,14 +23,14 @@ import (
 	"time"
 
 	"github.com/cloudflare/artifact-fs/gitfs"
-	"github.com/cloudflare/artifact-fs/internal/fsadapter"
 	"github.com/cloudflare/artifact-fs/internal/model"
 )
 
 var (
-	repoURL   = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
-	branch    = flag.String("branch", "main", "branch to check out")
+	repoURL    = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
+	branch     = flag.String("branch", "main", "branch to check out")
 	corsPrefix = flag.String("cors-prefix", "", "CORS proxy prefix for WASM (e.g. https://no-cors.up.railway.app/)")
+	persist    = flag.Bool("persist", false, "use SQLite-backed stores (fallback to :memory: on WASM)")
 )
 
 func main() {
@@ -162,7 +162,7 @@ func buildInMemoryFS() fs.FS {
 	snap.addFile("src/app.go", "package src\n\n// App does things.\n", 0o644)
 
 	ov := &memOverlay{entries: map[string]model.OverlayEntry{}}
-	resolver := &memResolver{snap: snap, ov: ov, gen: 1}
+	resolver := &exampleResolver{snap: snap, ov: ov, gen: 1}
 	engine := &memEngine{snap: snap, ov: ov, gen: 1, files: map[string][]byte{}}
 	return gitfs.New(engine, resolver)
 }
@@ -223,91 +223,21 @@ func (o *memOverlay) Get(path string) (model.OverlayEntry, bool) {
 	return e, ok
 }
 
-func (o *memOverlay) ListByPrefix(_ context.Context, _ string) ([]model.OverlayEntry, error) {
-	return nil, nil
-}
-
-type memResolver struct {
-	snap *memSnapshot
-	ov   *memOverlay
-	gen  int64
-}
-
-func (r *memResolver) ResolvePath(path string) (fsadapter.ResolvedNode, error) {
-	if ov, ok := r.ov.Get(path); ok {
-		if ov.IsDeleted() {
-			return fsadapter.ResolvedNode{}, fs.ErrNotExist
+func (o *memOverlay) ListByPrefix(_ context.Context, prefix string) ([]model.OverlayEntry, error) {
+	if prefix == "" || prefix == "." {
+		out := make([]model.OverlayEntry, 0, len(o.entries))
+		for _, e := range o.entries {
+			out = append(out, e)
 		}
-		return fsadapter.ResolvedNode{FromOverlay: true, Overlay: ov}, nil
+		return out, nil
 	}
-	if n, ok := r.snap.GetNode(r.gen, path); ok {
-		return fsadapter.ResolvedNode{Base: n}, nil
-	}
-	return fsadapter.ResolvedNode{}, fs.ErrNotExist
-}
-
-func (r *memResolver) Getattr(path string) (mode uint32, size int64, nodeType string, mtime, ctime time.Time, err error) {
-	n, err2 := r.ResolvePath(path)
-	if err2 != nil {
-		return 0, 0, "", time.Time{}, time.Time{}, err2
-	}
-	if n.FromOverlay {
-		return n.Overlay.Mode, n.Overlay.SizeBytes, n.Overlay.NodeType(),
-			time.Unix(0, n.Overlay.MtimeUnixNs), time.Unix(0, n.Overlay.CtimeUnixNs), nil
-	}
-	m := n.Base.Mode & 0o777
-	if n.Base.Type == "dir" && m == 0 {
-		m = 0o755
-	}
-	if (n.Base.Type == "file" || n.Base.Type == "symlink") && m == 0 {
-		m = 0o644
-	}
-	return m, n.Base.SizeBytes, n.Base.Type, time.Now(), time.Now(), nil
-}
-
-func (r *memResolver) ReaddirTyped(_ context.Context, path string) ([]fsadapter.ReaddirEntry, error) {
-	set := map[string]fsadapter.ReaddirEntry{}
-	children, err := r.snap.ListChildren(r.gen, path)
-	if err == nil {
-		for _, c := range children {
-			name := filepath.Base(c.Path)
-			set[name] = fsadapter.ReaddirEntry{Name: name, Type: c.Type}
+	out := []model.OverlayEntry{}
+	for _, e := range o.entries {
+		if strings.HasPrefix(e.Path, prefix+"/") || e.Path == prefix {
+			out = append(out, e)
 		}
-	}
-	for _, e := range r.ov.entries {
-		name, ok := childName(path, e.Path)
-		if !ok {
-			continue
-		}
-		if e.IsDeleted() {
-			delete(set, name)
-			continue
-		}
-		set[name] = fsadapter.ReaddirEntry{Name: name, Type: e.NodeType()}
-	}
-	out := make([]fsadapter.ReaddirEntry, 0, len(set))
-	for _, e := range set {
-		out = append(out, e)
 	}
 	return out, nil
-}
-
-func childName(parent, entryPath string) (string, bool) {
-	var rel string
-	if parent == "." {
-		rel = entryPath
-	} else {
-		var ok bool
-		rel, ok = strings.CutPrefix(entryPath, parent+"/")
-		if !ok {
-			return "", false
-		}
-	}
-	if rel == "" {
-		return "", false
-	}
-	rel, _, _ = strings.Cut(rel, "/")
-	return rel, true
 }
 
 type githubBlobFetcher struct {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/cloudflare/artifact-fs/gitfs"
 	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/cloudflare/artifact-fs/internal/overlay"
+	"github.com/cloudflare/artifact-fs/internal/snapshot"
 )
 
 func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
@@ -37,57 +40,113 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	}
 	fmt.Printf("tree: %d entries\n", len(tree))
 
-	snap := &memSnapshot{
-		nodes:   map[string]model.BaseNode{},
-		kids:    map[string][]model.BaseNode{},
-		content: map[string][]byte{},
-	}
-	snap.addDir(".")
-
+	nodes := []model.BaseNode{{Path: ".", Type: "dir", Mode: 0o755}}
 	for _, entry := range tree {
-		path := entry.Path
-		if path == "" {
+		if entry.Path == "" {
 			continue
 		}
 		mode := parseOctalMode(entry.Mode)
-
 		switch entry.Type {
 		case "blob":
-			snap.nodes[path] = model.BaseNode{
-				Path:      path,
-				Type:      "file",
-				Mode:      mode,
-				ObjectOID: entry.SHA,
-				SizeBytes: entry.Size,
-			}
-			dir := filepath.Dir(path)
-			snap.kids[dir] = append(snap.kids[dir], snap.nodes[path])
+			nodes = append(nodes, model.BaseNode{
+				Path: entry.Path, Type: "file", Mode: mode,
+				ObjectOID: entry.SHA, SizeBytes: entry.Size,
+			})
 		case "tree":
-			snap.nodes[path] = model.BaseNode{Path: path, Type: "dir", Mode: mode}
-			dir := filepath.Dir(path)
-			snap.kids[dir] = append(snap.kids[dir], snap.nodes[path])
+			nodes = append(nodes, model.BaseNode{
+				Path: entry.Path, Type: "dir", Mode: mode,
+			})
 		}
 	}
 
-	ov := &memOverlay{entries: map[string]model.OverlayEntry{}}
-	resolver := &memResolver{snap: snap, ov: ov, gen: 1}
+	var snap snapshotStore
+	var ov overlayStore
+
+	if *persist {
+		slog.Info("WASM: --persist set, trying SQLite :memory:")
+		ss, err := snapshot.New(ctx, ":memory:")
+		if err != nil {
+			slog.Warn("snapshot.New failed, falling back to in-memory", "err", err)
+		} else {
+			gen, err := ss.PublishGeneration(ctx, commitSHA, *branch, nodes)
+			if err != nil {
+				slog.Warn("PublishGeneration failed", "err", err)
+			} else {
+				slog.Info("snapshot: SQLite :memory: OK", "gen", gen, "nodes", len(nodes))
+				snap = ss
+			}
+		}
+		cfg := model.RepoConfig{
+			ID: "example", Name: "example",
+			OverlayDBPath: ":memory:", OverlayDir: filepath.Clean("/"),
+		}
+		os, err := overlay.New(ctx, cfg)
+		if err != nil {
+			slog.Warn("overlay.New failed, falling back to in-memory", "err", err)
+		} else {
+			slog.Info("overlay: SQLite :memory: OK")
+			ov = os
+		}
+	}
+
+	if snap == nil {
+		snap = buildMemSnapshot(tree)
+	}
+	if ov == nil {
+		ov = &memOverlay{entries: map[string]model.OverlayEntry{}}
+	}
+
+	content := map[string][]byte{}
+	resolver := &exampleResolver{snap: snap, ov: ov, gen: 1}
 	engine := &memEngine{
-		snap:  snap,
-		ov:    ov,
+		snap:  buildMemSnapshot(tree),
+		ov:    &memOverlay{entries: map[string]model.OverlayEntry{}},
 		gen:   1,
 		files: map[string][]byte{},
 		fetchBlob: &githubBlobFetcher{
-			owner: owner,
-			repo:  repo,
-			cache: snap.content,
+			owner: owner, repo: repo, cache: content,
 		},
 	}
 
-	fmt.Printf("snapshot: gen=1, %d files\n", len(snap.nodes))
+	fmt.Printf("snapshot: gen=1, %d files\n", len(nodes))
 	return gitfs.New(engine, resolver)
 }
 
+func buildMemSnapshot(tree []githubTreeEntry) *memSnapshot {
+	snap := &memSnapshot{
+		nodes: map[string]model.BaseNode{}, kids: map[string][]model.BaseNode{},
+		content: map[string][]byte{},
+	}
+	snap.addDir(".")
+	for _, e := range tree {
+		if e.Path == "" {
+			continue
+		}
+		mode := parseOctalMode(e.Mode)
+		switch e.Type {
+		case "blob":
+			snap.nodes[e.Path] = model.BaseNode{
+				Path: e.Path, Type: "file", Mode: mode,
+				ObjectOID: e.SHA, SizeBytes: e.Size,
+			}
+			snap.kids[filepath.Dir(e.Path)] = append(snap.kids[filepath.Dir(e.Path)], snap.nodes[e.Path])
+		case "tree":
+			snap.nodes[e.Path] = model.BaseNode{Path: e.Path, Type: "dir", Mode: mode}
+			snap.kids[filepath.Dir(e.Path)] = append(snap.kids[filepath.Dir(e.Path)], snap.nodes[e.Path])
+		}
+	}
+	return snap
+}
+
 // ─── GitHub API ─────────────────────────────────────────────────────────────
+
+type githubTreeEntry struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+	Size int64  `json:"size"`
+}
 
 func parseGitHubURL(raw string) (owner, repo string) {
 	raw = strings.TrimSuffix(raw, ".git")
@@ -121,14 +180,6 @@ func githubResolveRef(ctx context.Context, owner, repo, ref string) (string, err
 		return "", err
 	}
 	return result.Object.SHA, nil
-}
-
-type githubTreeEntry struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-	Type string `json:"type"`
-	SHA  string `json:"sha"`
-	Size int64  `json:"size"`
 }
 
 func githubGetTree(ctx context.Context, owner, repo, sha string) ([]githubTreeEntry, error) {
