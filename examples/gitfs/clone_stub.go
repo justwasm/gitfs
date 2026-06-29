@@ -4,12 +4,12 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io/fs"
+	"log"
 )
 
 func cloneAndBuildFSImpl(_ context.Context) fs.FS {
-	fmt.Println("ERROR: --repo requires git and SQLite (not available in WASM)")
-	fmt.Println("       Use the in-memory demo without --repo, or run on a native platform.")
-	return nil
+	log.Fatal("ERROR: --repo requires git and a native OS (not available in WASM).\n" +
+		"       Run without --repo for the in-memory demo, or use a native platform.")
+	return nil // unreachable
 }

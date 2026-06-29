@@ -44,6 +44,10 @@ func main() {
 		fsys = cloneAndBuildFS(ctx)
 	}
 
+	if fsys == nil {
+		log.Fatal("no filesystem available")
+	}
+
 	// ── Read root ───────────────────────────────────────────────────────
 
 	fmt.Println("--- Root ---")
