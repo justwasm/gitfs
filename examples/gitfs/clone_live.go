@@ -39,7 +39,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	}
 
 	gitStore := gitstore.New(nil)
-	defer gitStore.Close()
+	// Note: no defer gitStore.Close() — it must stay open for hydrator blob reads.
 
 	fmt.Println("cloning ...")
 	if err := gitStore.CloneBlobless(ctx, cfg); err != nil {
@@ -56,7 +56,6 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	if err != nil {
 		log.Fatalf("snapshot: %v", err)
 	}
-	defer snap.Close()
 
 	nodes, err := gitStore.BuildTreeIndex(ctx, cfg, headOID)
 	if err != nil {
@@ -72,11 +71,9 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	if err != nil {
 		log.Fatalf("overlay: %v", err)
 	}
-	defer ov.Close()
 
 	h := hydrator.New(gitStore)
 	h.Start(2, cfg)
-	defer h.Stop()
 
 	resolver := &fusefs.Resolver{Snapshot: snap, Overlay: ov}
 	resolver.SetGeneration(gen)
