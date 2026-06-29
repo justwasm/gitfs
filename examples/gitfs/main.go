@@ -28,8 +28,9 @@ import (
 )
 
 var (
-	repoURL = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
-	branch  = flag.String("branch", "main", "branch to check out")
+	repoURL   = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
+	branch    = flag.String("branch", "main", "branch to check out")
+	corsPrefix = flag.String("cors-prefix", "", "CORS proxy prefix for WASM (e.g. https://no-cors.up.railway.app/)")
 )
 
 func main() {
@@ -320,6 +321,9 @@ func (f *githubBlobFetcher) fetch(ctx context.Context, oid string) ([]byte, erro
 		return data, nil
 	}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/blobs/%s", f.owner, f.repo, oid)
+	if *corsPrefix != "" {
+		url = *corsPrefix + url
+	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	req.Header.Set("Accept", "application/vnd.github.v3.raw")
 	resp, err := http.DefaultClient.Do(req)

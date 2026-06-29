@@ -102,7 +102,7 @@ func parseGitHubURL(raw string) (owner, repo string) {
 }
 
 func githubResolveRef(ctx context.Context, owner, repo, ref string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/heads/%s", owner, repo, ref)
+	url := apiURL(fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/heads/%s", owner, repo, ref))
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -132,7 +132,7 @@ type githubTreeEntry struct {
 }
 
 func githubGetTree(ctx context.Context, owner, repo, sha string) ([]githubTreeEntry, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", owner, repo, sha)
+	url := apiURL(fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", owner, repo, sha))
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -160,4 +160,11 @@ func parseOctalMode(mode string) uint32 {
 		return 0o644
 	}
 	return uint32(v)
+}
+
+func apiURL(url string) string {
+	if *corsPrefix != "" {
+		return *corsPrefix + url
+	}
+	return url
 }
