@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -308,35 +309,76 @@ func childName(parent, entryPath string) (string, bool) {
 	return rel, true
 }
 
-type memEngine struct {
-	snap  *memSnapshot
-	ov    *memOverlay
-	gen   int64
-	files map[string][]byte
+type githubBlobFetcher struct {
+	owner string
+	repo  string
+	cache map[string][]byte
 }
 
-func (e *memEngine) Read(_ context.Context, path string, off int64, size int) ([]byte, error) {
-	if data, ok := e.files[path]; ok {
-		if off >= int64(len(data)) {
-			return nil, io.EOF
-		}
-		end := off + int64(size)
-		if end > int64(len(data)) {
-			end = int64(len(data))
-		}
-		return data[off:end], nil
+func (f *githubBlobFetcher) fetch(ctx context.Context, oid string) ([]byte, error) {
+	if data, ok := f.cache[oid]; ok {
+		return data, nil
 	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/blobs/%s", f.owner, f.repo, oid)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req.Header.Set("Accept", "application/vnd.github.v3.raw")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("blob %s: HTTP %d", oid[:12], resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	f.cache[oid] = data
+	return data, nil
+}
+
+type memEngine struct {
+	snap      *memSnapshot
+	ov        *memOverlay
+	gen       int64
+	files     map[string][]byte
+	fetchBlob *githubBlobFetcher // nil for in-memory demo
+}
+
+func (e *memEngine) Read(ctx context.Context, path string, off int64, size int) ([]byte, error) {
+	// Check overlay writes first.
+	if data, ok := e.files[path]; ok {
+		return sliceChunk(data, off, size), nil
+	}
+	// Check snapshot content cache.
 	if data, ok := e.snap.content[path]; ok {
-		if off >= int64(len(data)) {
-			return nil, io.EOF
+		return sliceChunk(data, off, size), nil
+	}
+	// Lazy-fetch blob from remote (WASM clone path).
+	if e.fetchBlob != nil {
+		node, ok := e.snap.GetNode(e.gen, path)
+		if ok && node.ObjectOID != "" {
+			data, err := e.fetchBlob.fetch(ctx, node.ObjectOID)
+			if err != nil {
+				return nil, err
+			}
+			e.snap.content[path] = data
+			return sliceChunk(data, off, size), nil
 		}
-		end := off + int64(size)
-		if end > int64(len(data)) {
-			end = int64(len(data))
-		}
-		return data[off:end], nil
 	}
 	return nil, fs.ErrNotExist
+}
+
+func sliceChunk(data []byte, off int64, size int) []byte {
+	if off >= int64(len(data)) {
+		return nil
+	}
+	end := off + int64(size)
+	if end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	return data[off:end]
 }
 
 func (e *memEngine) Write(_ context.Context, path string, off int64, data []byte) (int, error) {
