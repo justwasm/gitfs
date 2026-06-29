@@ -1,22 +1,22 @@
 // Package main demonstrates using the gitfs package to clone a repository
 // and read its contents through Go's standard io/fs interface.
 //
-// It clones https://github.com/justwasm/gitfs (blobless), builds a snapshot,
-// and reads files without mounting FUSE.
-//
 // Usage:
 //
 //	go run ./examples/gitfs
+//	go run ./examples/gitfs --repo https://github.com/cloudflare/artifact-fs
+//	go run ./examples/gitfs --repo https://github.com/golang/go --branch master
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cloudflare/artifact-fs/gitfs"
@@ -27,7 +27,13 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/snapshot"
 )
 
+var (
+	repoURL = flag.String("repo", "https://github.com/justwasm/gitfs", "git remote URL to clone")
+	branch  = flag.String("branch", "main", "branch to check out")
+)
+
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	// ── 1. Create temp state directory ───────────────────────────────────
@@ -42,17 +48,17 @@ func main() {
 	// ── 2. Configure the repository ──────────────────────────────────────
 
 	cfg := model.RepoConfig{
-		ID:              "example",
-		Name:            "example",
-		RemoteURL:       "https://github.com/justwasm/gitfs",
-		Branch:          "main",
-		MountRoot:       filepath.Join(stateRoot, "mnt"),
-		MountPath:       filepath.Join(stateRoot, "mnt", "example"),
-		GitDir:          filepath.Join(stateRoot, "repos", "example", "git"),
-		OverlayDir:      filepath.Join(stateRoot, "overlays", "example"),
-		BlobCacheDir:    filepath.Join(stateRoot, "cache", "blobs", "example"),
-		MetaDBPath:      filepath.Join(stateRoot, "meta", "example.sqlite"),
-		OverlayDBPath:   filepath.Join(stateRoot, "overlays", "example", "meta.sqlite"),
+		ID:            "example",
+		Name:          "example",
+		RemoteURL:     *repoURL,
+		Branch:        *branch,
+		MountRoot:     filepath.Join(stateRoot, "mnt"),
+		MountPath:     filepath.Join(stateRoot, "mnt", "example"),
+		GitDir:        filepath.Join(stateRoot, "repos", "example", "git"),
+		OverlayDir:    filepath.Join(stateRoot, "overlays", "example"),
+		BlobCacheDir:  filepath.Join(stateRoot, "cache", "blobs", "example"),
+		MetaDBPath:    filepath.Join(stateRoot, "meta", "example.sqlite"),
+		OverlayDBPath: filepath.Join(stateRoot, "overlays", "example", "meta.sqlite"),
 	}
 
 	// ── 3. Clone the repository (blobless) ───────────────────────────────
@@ -60,7 +66,7 @@ func main() {
 	gitStore := gitstore.New(nil)
 	defer gitStore.Close()
 
-	fmt.Println("cloning", cfg.RemoteURL, "...")
+	fmt.Println("cloning", cfg.RemoteURL, "("+cfg.Branch+")", "...")
 	if err := gitStore.CloneBlobless(ctx, cfg); err != nil {
 		log.Fatalf("clone: %v", err)
 	}
@@ -113,7 +119,7 @@ func main() {
 
 	fsys := gitfs.New(engine, resolver)
 
-	// ── 8. Read files ────────────────────────────────────────────────────
+	// ── 8. Read the root directory ───────────────────────────────────────
 
 	fmt.Println("\n--- Root directory ---")
 	entries, err := fs.ReadDir(fsys, ".")
@@ -128,66 +134,75 @@ func main() {
 		fmt.Printf("  %s [%s]\n", e.Name(), kind)
 	}
 
+	// ── 9. Walk the entire tree ──────────────────────────────────────────
+
 	fmt.Println("\n--- Walk ---")
+	var fileCount, dirCount int
 	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  %s\n", path)
+		if d.IsDir() {
+			dirCount++
+		} else {
+			fileCount++
+		}
 		return nil
 	})
+	fmt.Printf("  %d directories, %d files\n", dirCount, fileCount)
 
-	// Try reading a file (any text file in the repo).
-	fmt.Println("\n--- Read files ---")
-	for _, name := range []string{"README.md", "go.mod", "LICENSE"} {
+	// ── 10. Discover and read a few files dynamically ────────────────────
+
+	fmt.Println("\n--- Sample files ---")
+	var samples []string
+	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || len(samples) >= 3 {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".md" || ext == ".go" || ext == ".txt" || ext == ".mod" {
+			samples = append(samples, path)
+		}
+		return nil
+	})
+	if len(samples) == 0 {
+		// Fallback: just grab the first 3 files.
+		fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || len(samples) >= 3 {
+				return nil
+			}
+			samples = append(samples, path)
+			return nil
+		})
+	}
+	for _, name := range samples {
 		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			fmt.Printf("  %s: %v\n", name, err)
 			continue
 		}
-		// Print first 200 bytes.
-	preview := data
+		preview := data
 		if len(preview) > 200 {
 			preview = preview[:200]
 		}
-		fmt.Printf("  %s (%d bytes):\n%s\n\n", name, len(data), preview)
+		fmt.Printf("  %s (%d bytes):\n    %s\n\n", name, len(data), strings.ReplaceAll(string(preview), "\n", "\n    "))
 	}
 
-	// ── 9. Stat a file ───────────────────────────────────────────────────
+	// ── 11. Stat the root and a file ─────────────────────────────────────
 
 	fmt.Println("--- Stat ---")
-	for _, name := range []string{".", "go.mod"} {
-		fi, err := fs.Stat(fsys, name)
-		if err != nil {
-			fmt.Printf("  %s: %v\n", name, err)
-			continue
-		}
-		fmt.Printf("  %s: size=%d mode=%s isDir=%v\n", name, fi.Size(), fi.Mode(), fi.IsDir())
-	}
-
-	// ── 10. Use standard library functions ───────────────────────────────
-
-	fmt.Println("\n--- fs.Glob ---")
-	matches, err := fs.Glob(fsys, "**/*.go")
+	fi, err := fs.Stat(fsys, ".")
 	if err != nil {
-		// fs.Glob doesn't support **, use Walk instead.
-		fmt.Println("  (fs.Glob doesn't support **, skipping)")
+		log.Fatalf("stat root: %v", err)
 	}
-	for _, m := range matches {
-		fmt.Printf("  %s\n", m)
-	}
+	fmt.Printf("  .: size=%d mode=%s isDir=%v\n", fi.Size(), fi.Mode(), fi.IsDir())
 
-	// Walk to find .go files.
-	fmt.Println("\n--- .go files ---")
-	fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+	if len(samples) > 0 {
+		fi, err = fs.Stat(fsys, samples[0])
 		if err != nil {
-			return nil
+			fmt.Printf("  %s: %v\n", samples[0], err)
+		} else {
+			fmt.Printf("  %s: size=%d mode=%s isDir=%v\n", samples[0], fi.Size(), fi.Mode(), fi.IsDir())
 		}
-		if !d.IsDir() && filepath.Ext(path) == ".go" {
-			fmt.Printf("  %s\n", path)
-		}
-		return nil
-	})
-
-	_ = io.Discard // ensure io is used
+	}
 }
