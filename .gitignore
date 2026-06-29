@@ -31,3 +31,4 @@ __debug_bin*
 # Environment / secrets
 .env
 .env.*
+.gitfs-example-state/
