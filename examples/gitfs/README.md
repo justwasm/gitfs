@@ -53,3 +53,16 @@ go run ./examples/gitfs
 ```
 
 Requires `git` on `$PATH` for native clone mode. WASM mode only needs HTTP access to GitHub API.
+
+## SQLite databases
+
+`--persist` opens two SQLite databases:
+
+| Database | Purpose | Schema |
+|----------|---------|--------|
+| Snapshot DB | Repository baseline: file tree, modes, OIDs, sizes | `repo_state` (HEAD OID, ref, generation) + `base_nodes` (path → metadata) |
+| Overlay DB | User modifications: create, modify, delete, rename, mkdir, symlink | `overlay_entries` (path → kind, backing path, mode, timestamps) |
+
+Read flow: overlay checked first (takes priority), then fallback to snapshot base nodes. This implements copy-on-write: a read-only snapshot + a mutable overlay layer.
+
+On native, databases are file-based (`/tmp/gitfs-example.sqlite`). On WASM, file I/O fails and both fall back to `:memory:` automatically (logged via `slog` to stderr).

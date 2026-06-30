@@ -84,16 +84,17 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 		existingNodes = treeToNodes(tree)
 
 		if *persist && persistSnap != nil {
+			fmt.Println("step 3b: publishing to snapshot store")
 			gen, err := persistSnap.PublishGeneration(ctx, commitSHA, *branch, existingNodes)
 			if err != nil {
-				slog.Warn("PublishGeneration failed", "err", err)
+				fmt.Printf("step 3b: PublishGeneration failed: %v\n", err)
 			} else {
-				slog.Info("snapshot published", "gen", gen, "nodes", len(existingNodes))
+				fmt.Printf("step 3b: published gen=%d nodes=%d\n", gen, len(existingNodes))
 				snap = persistSnap
 			}
 		}
 	} else {
-		slog.Info("skipping GitHub API (snapshot cache hit)")
+		fmt.Println("step 3: cache hit, skipping GitHub API")
 	}
 
 	if snap == nil {
