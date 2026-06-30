@@ -7,23 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 
-	"github.com/ncruces/go-sqlite3"
-	"github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/justwasm/sqlite3-vfs-idb"
+	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
-var pragmas = map[string]string{
-	"journal_mode": "WAL",
-	"foreign_keys": "ON",
-	"busy_timeout": "5000",
-}
-
-// OpenDB opens a SQLite database with a 3-tier fallback:
-//  1. Native file-based SQLite (best for WASM-less environments)
-//  2. IDB VFS (IndexedDB persistence on WASM, in-memory on native)
-//  3. Pure in-memory (last resort, no persistence)
 func OpenDB(path string) (*sql.DB, error) {
 	if path == "" {
 		path = ":memory:"
@@ -32,18 +19,25 @@ func OpenDB(path string) (*sql.DB, error) {
 	// Tier 1: native file-based SQLite.
 	if path != ":memory:" {
 		if db, err := openFile(path); err == nil {
+			slog.Info("meta: using file-based database", "path", path)
 			return db, nil
+		} else {
+			slog.Warn("meta: file-based db failed, trying IDB VFS", "path", path, "err", err)
 		}
 	}
 
 	// Tier 2: IDB VFS (IndexedDB on WASM, in-memory on native).
 	if path != ":memory:" {
 		if db, err := openIDB(path); err == nil {
+			slog.Info("meta: using IDB VFS database", "path", path)
 			return db, nil
+		} else {
+			slog.Warn("meta: IDB VFS failed, falling back to memory", "path", path, "err", err)
 		}
 	}
 
 	// Tier 3: pure in-memory.
+	slog.Info("meta: using in-memory database")
 	return openMemory()
 }
 
@@ -51,45 +45,31 @@ func openFile(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_txlock=immediate", path)
-	db, err := driver.Open(dsn, pragmaSetter)
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db file: %w", err)
 	}
-	slog.Info("meta: using file-based database", "path", path)
-	return db, nil
-}
-
-func openIDB(path string) (*sql.DB, error) {
-	if runtime.GOOS != "js" {
-		return nil, fmt.Errorf("idb vfs not available on this platform")
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping db file: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_txlock=immediate&vfs=idb", path)
-	db, err := driver.Open(dsn, pragmaSetter)
-	if err != nil {
-		return nil, fmt.Errorf("open idb db: %w", err)
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init db file: %w", err)
 	}
-	slog.Info("meta: using IndexedDB-backed database", "path", path)
 	return db, nil
 }
 
 func openMemory() (*sql.DB, error) {
-	dsn := "file::memory:?_txlock=immediate"
-	db, err := driver.Open(dsn, pragmaSetter)
+	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		return nil, fmt.Errorf("open memory db: %w", err)
 	}
-	slog.Info("meta: using in-memory database")
-	return db, nil
-}
-
-func pragmaSetter(c *sqlite3.Conn) error {
-	for name, value := range pragmas {
-		if err := c.Exec(fmt.Sprintf("PRAGMA %s = %s;", name, value)); err != nil {
-			return fmt.Errorf("set pragma %q: %w", name, err)
-		}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON;`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("init memory db: %w", err)
 	}
-	return nil
+	return db, nil
 }
 
 func ExecMigrations(ctx context.Context, db *sql.DB, stmts []string) error {
