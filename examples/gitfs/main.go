@@ -163,7 +163,11 @@ func buildInMemoryFS() fs.FS {
 
 	ov := &memOverlay{entries: map[string]model.OverlayEntry{}}
 	resolver := &exampleResolver{snap: snap, ov: ov, gen: 1}
-	engine := &memEngine{snap: snap, ov: ov, gen: 1, files: map[string][]byte{}}
+	blobCache := map[string][]byte{}
+	for path, data := range snap.content {
+		blobCache[path] = data
+	}
+	engine := &memEngine{snap: snap, ov: ov, gen: 1, files: map[string][]byte{}, blobCache: blobCache}
 	return gitfs.New(engine, resolver)
 }
 
@@ -273,10 +277,11 @@ func (f *githubBlobFetcher) fetch(ctx context.Context, oid string) ([]byte, erro
 }
 
 type memEngine struct {
-	snap      *memSnapshot
+	snap      snapshotStore
 	ov        *memOverlay
 	gen       int64
 	files     map[string][]byte
+	blobCache map[string][]byte
 	fetchBlob *githubBlobFetcher // nil for in-memory demo
 }
 
@@ -285,8 +290,8 @@ func (e *memEngine) Read(ctx context.Context, path string, off int64, size int) 
 	if data, ok := e.files[path]; ok {
 		return sliceChunk(data, off, size), nil
 	}
-	// Check snapshot content cache.
-	if data, ok := e.snap.content[path]; ok {
+	// Check blob cache.
+	if data, ok := e.blobCache[path]; ok {
 		return sliceChunk(data, off, size), nil
 	}
 	// Lazy-fetch blob from remote (WASM clone path).
@@ -297,7 +302,7 @@ func (e *memEngine) Read(ctx context.Context, path string, off int64, size int) 
 			if err != nil {
 				return nil, err
 			}
-			e.snap.content[path] = data
+			e.blobCache[path] = data
 			return sliceChunk(data, off, size), nil
 		}
 	}

@@ -117,16 +117,21 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	content := map[string][]byte{}
 	resolver := &exampleResolver{snap: snap, ov: ov, gen: 1}
 	engine := &memEngine{
-		snap:  buildMemSnapshot(existingNodes),
-		ov:    &memOverlay{entries: map[string]model.OverlayEntry{}},
-		gen:   1,
-		files: map[string][]byte{},
+		snap:      snap,
+		ov:        &memOverlay{entries: map[string]model.OverlayEntry{}},
+		gen:       1,
+		files:     map[string][]byte{},
+		blobCache: map[string][]byte{},
 		fetchBlob: &githubBlobFetcher{
 			owner: owner, repo: repo, cache: content,
 		},
 	}
 
-	fmt.Printf("snapshot: gen=1, %d files\n", len(existingNodes))
+	var nodeCount int
+	if existingNodes != nil {
+		nodeCount = len(existingNodes)
+	}
+	fmt.Printf("snapshot: gen=1, %d files\n", nodeCount)
 	return gitfs.New(engine, resolver)
 }
 
