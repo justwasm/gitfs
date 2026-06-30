@@ -39,6 +39,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	var snap snapshotStore
 	var ov overlayStore
 	var existingNodes []model.BaseNode
+	var persistSnap *snapshot.Store // keep reference for PublishGeneration
 
 	if *persist {
 		slog.Info("--persist: trying file-based SQLite")
@@ -52,14 +53,13 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 		if err != nil {
 			slog.Warn("snapshot.New failed", "err", err)
 		} else {
+			persistSnap = ss
 			headOID, _, gen, err := ss.ReadState(ctx)
-			if err == nil && headOID == commitSHA {
+			if err == nil && headOID != "" && headOID == commitSHA {
 				slog.Info("snapshot cache hit", "gen", gen, "head", headOID[:12])
 				snap = ss
-			} else if err == nil {
-				slog.Info("snapshot stale, will refresh", "stored", headOID[:12], "current", commitSHA[:12])
 			} else {
-				slog.Info("no existing snapshot")
+				slog.Info("no cached snapshot, will fetch from GitHub")
 			}
 		}
 		os, err := overlay.New(ctx, cfg)
@@ -83,19 +83,13 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 
 		existingNodes = treeToNodes(tree)
 
-		if *persist && snap == nil {
-			cfg := model.RepoConfig{
-				ID: "example", Name: "example",
-				MetaDBPath: "/tmp/gitfs-example.sqlite",
-			}
-			if ss, err := snapshot.New(ctx, cfg.MetaDBPath); err == nil {
-				gen, err := ss.PublishGeneration(ctx, commitSHA, *branch, existingNodes)
-				if err != nil {
-					slog.Warn("PublishGeneration failed", "err", err)
-				} else {
-					slog.Info("snapshot published", "gen", gen, "nodes", len(existingNodes))
-					snap = ss
-				}
+		if *persist && persistSnap != nil {
+			gen, err := persistSnap.PublishGeneration(ctx, commitSHA, *branch, existingNodes)
+			if err != nil {
+				slog.Warn("PublishGeneration failed", "err", err)
+			} else {
+				slog.Info("snapshot published", "gen", gen, "nodes", len(existingNodes))
+				snap = persistSnap
 			}
 		}
 	} else {
