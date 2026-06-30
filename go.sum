@@ -6,6 +6,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/jacobsa/fuse v0.0.0-20260603130850-6ac65ea4e14c h1:vWgzO4dRprAo0jrqgTLFC9iMP5k5UQzWX8DpMHblGDE=
 github.com/jacobsa/fuse v0.0.0-20260603130850-6ac65ea4e14c/go.mod h1:fcpw1yk/suvFhB8rT9P+pst+NLboWsBLky9csooKjPc=
+github.com/justwasm/sqlite3-vfs-idb v0.0.7 h1:Tg5x8KlgMQh730nzRsmb4WA6PNi0RRN9mUqkmXHagcs=
+github.com/justwasm/sqlite3-vfs-idb v0.0.7/go.mod h1:vI53UuDP8Rcg6vId+RbVgqpMI8eQpUAKZjLdaABE1qg=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/ncruces/go-sqlite3 v0.35.1 h1:h/LaVyQwIvBBT0+2JmVe2tbYyWjUQ093/pYhpBqdxJo=

@@ -30,7 +30,7 @@ var (
 	repoURL    = flag.String("repo", "", "git remote URL to clone (empty = in-memory demo)")
 	branch     = flag.String("branch", "main", "branch to check out")
 	corsPrefix = flag.String("cors-prefix", "", "CORS proxy prefix for WASM (e.g. https://no-cors.up.railway.app/)")
-	persist    = flag.Bool("persist", false, "use SQLite-backed stores (fallback to :memory: on WASM)")
+	persist    = flag.Bool("persist", false, "use SQLite-backed stores with 3-tier fallback: native file → IDB VFS (IndexedDB on WASM) → :memory:")
 )
 
 func main() {

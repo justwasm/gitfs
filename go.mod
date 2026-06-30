@@ -10,6 +10,7 @@ require (
 
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
+	github.com/justwasm/sqlite3-vfs-idb v0.0.7 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v3 v3.1.35302 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect

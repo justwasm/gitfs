@@ -47,6 +47,7 @@ func New(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	if err := meta.ExecMigrations(ctx, db, migrations); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil

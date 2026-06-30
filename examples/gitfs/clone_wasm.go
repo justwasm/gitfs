@@ -42,7 +42,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	var persistSnap *snapshot.Store // keep reference for PublishGeneration
 
 	if *persist {
-		slog.Info("--persist: trying file-based SQLite")
+		slog.Info("--persist: opening DB (3-tier fallback: file → IDB → memory)")
 		cfg := model.RepoConfig{
 			ID: "example", Name: "example",
 			MetaDBPath:    "/tmp/gitfs-example.sqlite",
@@ -51,7 +51,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 		}
 		ss, err := snapshot.New(ctx, cfg.MetaDBPath)
 		if err != nil {
-			slog.Warn("snapshot.New failed", "err", err)
+			slog.Warn("snapshot.New failed, falling back to in-memory", "err", err)
 		} else {
 			persistSnap = ss
 			headOID, _, gen, err := ss.ReadState(ctx)
@@ -64,7 +64,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 		}
 		os, err := overlay.New(ctx, cfg)
 		if err != nil {
-			slog.Warn("overlay.New failed", "err", err)
+			slog.Warn("overlay.New failed, falling back to in-memory", "err", err)
 		} else {
 			slog.Info("overlay: OK")
 			ov = os
