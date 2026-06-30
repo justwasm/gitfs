@@ -21,12 +21,12 @@ import (
 )
 
 func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
-	fmt.Println("(WASM: fetching tree via GitHub API)")
-
 	owner, repo := parseGitHubURL(*repoURL)
 	if owner == "" {
 		log.Fatal("ERROR: --repo in WASM only supports github.com URLs")
 	}
+
+	// ── 1. Resolve HEAD (always needs GitHub API) ───────────────────────
 
 	commitSHA, err := githubResolveRef(ctx, owner, repo, *branch)
 	if err != nil {
@@ -34,63 +34,86 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	}
 	fmt.Printf("HEAD: %s (%s)\n", commitSHA[:12], *branch)
 
-	tree, err := githubGetTree(ctx, owner, repo, commitSHA)
-	if err != nil {
-		log.Fatalf("get tree: %v", err)
-	}
-	fmt.Printf("tree: %d entries\n", len(tree))
-
-	nodes := []model.BaseNode{{Path: ".", Type: "dir", Mode: 0o755}}
-	for _, entry := range tree {
-		if entry.Path == "" {
-			continue
-		}
-		mode := parseOctalMode(entry.Mode)
-		switch entry.Type {
-		case "blob":
-			nodes = append(nodes, model.BaseNode{
-				Path: entry.Path, Type: "file", Mode: mode,
-				ObjectOID: entry.SHA, SizeBytes: entry.Size,
-			})
-		case "tree":
-			nodes = append(nodes, model.BaseNode{
-				Path: entry.Path, Type: "dir", Mode: mode,
-			})
-		}
-	}
+	// ── 2. Try loading from existing snapshot (if --persist) ────────────
 
 	var snap snapshotStore
 	var ov overlayStore
+	var existingNodes []model.BaseNode
 
 	if *persist {
-		slog.Info("WASM: --persist set, trying SQLite :memory:")
-		ss, err := snapshot.New(ctx, ":memory:")
-		if err != nil {
-			slog.Warn("snapshot.New failed, falling back to in-memory", "err", err)
-		} else {
-			gen, err := ss.PublishGeneration(ctx, commitSHA, *branch, nodes)
-			if err != nil {
-				slog.Warn("PublishGeneration failed", "err", err)
-			} else {
-				slog.Info("snapshot: SQLite :memory: OK", "gen", gen, "nodes", len(nodes))
-				snap = ss
-			}
-		}
+		slog.Info("--persist: trying file-based SQLite")
 		cfg := model.RepoConfig{
 			ID: "example", Name: "example",
-			OverlayDBPath: ":memory:", OverlayDir: filepath.Clean("/"),
+			MetaDBPath:    "/tmp/gitfs-example.sqlite",
+			OverlayDBPath: "/tmp/gitfs-overlay.sqlite",
+			OverlayDir:    "/tmp/gitfs-overlay-upper",
+		}
+		ss, err := snapshot.New(ctx, cfg.MetaDBPath)
+		if err != nil {
+			slog.Warn("snapshot.New failed", "err", err)
+		} else {
+			headOID, _, gen, err := ss.ReadState(ctx)
+			if err == nil && headOID == commitSHA {
+				slog.Info("snapshot cache hit", "gen", gen, "head", headOID[:12])
+				snap = ss
+			} else if err == nil {
+				slog.Info("snapshot stale, will refresh", "stored", headOID[:12], "current", commitSHA[:12])
+			} else {
+				slog.Info("no existing snapshot")
+			}
 		}
 		os, err := overlay.New(ctx, cfg)
 		if err != nil {
-			slog.Warn("overlay.New failed, falling back to in-memory", "err", err)
+			slog.Warn("overlay.New failed", "err", err)
 		} else {
-			slog.Info("overlay: SQLite :memory: OK")
+			slog.Info("overlay: OK")
 			ov = os
 		}
 	}
 
+	// ── 3. Fetch tree from GitHub API (if needed) ───────────────────────
+
 	if snap == nil {
-		snap = buildMemSnapshot(tree)
+		fmt.Println("(fetching tree via GitHub API)")
+		tree, err := githubGetTree(ctx, owner, repo, commitSHA)
+		if err != nil {
+			log.Fatalf("get tree: %v", err)
+		}
+		fmt.Printf("tree: %d entries\n", len(tree))
+
+		existingNodes = treeToNodes(tree)
+
+		if *persist && snap == nil {
+			cfg := model.RepoConfig{
+				ID: "example", Name: "example",
+				MetaDBPath: "/tmp/gitfs-example.sqlite",
+			}
+			if ss, err := snapshot.New(ctx, cfg.MetaDBPath); err == nil {
+				gen, err := ss.PublishGeneration(ctx, commitSHA, *branch, existingNodes)
+				if err != nil {
+					slog.Warn("PublishGeneration failed", "err", err)
+				} else {
+					slog.Info("snapshot published", "gen", gen, "nodes", len(existingNodes))
+					snap = ss
+				}
+			}
+		}
+	} else {
+		slog.Info("skipping GitHub API (snapshot cache hit)")
+	}
+
+	if snap == nil {
+		if existingNodes == nil {
+			// No cache, no --persist: fetch tree for in-memory.
+			fmt.Println("(fetching tree via GitHub API)")
+			tree, err := githubGetTree(ctx, owner, repo, commitSHA)
+			if err != nil {
+				log.Fatalf("get tree: %v", err)
+			}
+			fmt.Printf("tree: %d entries\n", len(tree))
+			existingNodes = treeToNodes(tree)
+		}
+		snap = buildMemSnapshot(existingNodes)
 	}
 	if ov == nil {
 		ov = &memOverlay{entries: map[string]model.OverlayEntry{}}
@@ -99,7 +122,7 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 	content := map[string][]byte{}
 	resolver := &exampleResolver{snap: snap, ov: ov, gen: 1}
 	engine := &memEngine{
-		snap:  buildMemSnapshot(tree),
+		snap:  buildMemSnapshot(existingNodes),
 		ov:    &memOverlay{entries: map[string]model.OverlayEntry{}},
 		gen:   1,
 		files: map[string][]byte{},
@@ -108,37 +131,11 @@ func cloneAndBuildFSImpl(ctx context.Context) fs.FS {
 		},
 	}
 
-	fmt.Printf("snapshot: gen=1, %d files\n", len(nodes))
+	fmt.Printf("snapshot: gen=1, %d files\n", len(existingNodes))
 	return gitfs.New(engine, resolver)
 }
 
-func buildMemSnapshot(tree []githubTreeEntry) *memSnapshot {
-	snap := &memSnapshot{
-		nodes: map[string]model.BaseNode{}, kids: map[string][]model.BaseNode{},
-		content: map[string][]byte{},
-	}
-	snap.addDir(".")
-	for _, e := range tree {
-		if e.Path == "" {
-			continue
-		}
-		mode := parseOctalMode(e.Mode)
-		switch e.Type {
-		case "blob":
-			snap.nodes[e.Path] = model.BaseNode{
-				Path: e.Path, Type: "file", Mode: mode,
-				ObjectOID: e.SHA, SizeBytes: e.Size,
-			}
-			snap.kids[filepath.Dir(e.Path)] = append(snap.kids[filepath.Dir(e.Path)], snap.nodes[e.Path])
-		case "tree":
-			snap.nodes[e.Path] = model.BaseNode{Path: e.Path, Type: "dir", Mode: mode}
-			snap.kids[filepath.Dir(e.Path)] = append(snap.kids[filepath.Dir(e.Path)], snap.nodes[e.Path])
-		}
-	}
-	return snap
-}
-
-// ─── GitHub API ─────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 type githubTreeEntry struct {
 	Path string `json:"path"`
@@ -147,6 +144,47 @@ type githubTreeEntry struct {
 	SHA  string `json:"sha"`
 	Size int64  `json:"size"`
 }
+
+func treeToNodes(tree []githubTreeEntry) []model.BaseNode {
+	nodes := []model.BaseNode{{Path: ".", Type: "dir", Mode: 0o755}}
+	for _, e := range tree {
+		if e.Path == "" {
+			continue
+		}
+		mode := parseOctalMode(e.Mode)
+		switch e.Type {
+		case "blob":
+			nodes = append(nodes, model.BaseNode{
+				Path: e.Path, Type: "file", Mode: mode,
+				ObjectOID: e.SHA, SizeBytes: e.Size,
+			})
+		case "tree":
+			nodes = append(nodes, model.BaseNode{
+				Path: e.Path, Type: "dir", Mode: mode,
+			})
+		}
+	}
+	return nodes
+}
+
+func buildMemSnapshot(nodes []model.BaseNode) *memSnapshot {
+	snap := &memSnapshot{
+		nodes: map[string]model.BaseNode{}, kids: map[string][]model.BaseNode{},
+		content: map[string][]byte{},
+	}
+	snap.addDir(".")
+	for _, n := range nodes {
+		if n.Path == "." || n.Path == "" {
+			continue
+		}
+		snap.nodes[n.Path] = n
+		dir := filepath.Dir(n.Path)
+		snap.kids[dir] = append(snap.kids[dir], n)
+	}
+	return snap
+}
+
+// ─── GitHub API ─────────────────────────────────────────────────────────────
 
 func parseGitHubURL(raw string) (owner, repo string) {
 	raw = strings.TrimSuffix(raw, ".git")
